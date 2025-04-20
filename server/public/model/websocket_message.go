@@ -219,6 +219,7 @@ type WebSocketEvent struct {
 	broadcast       *WebsocketBroadcast
 	sequence        int64
 	precomputedJSON *precomputedWebSocketEventJSON
+	fromCluster     bool // Indicates if this event originated from another cluster node
 }
 
 // PrecomputeJSON precomputes and stores the serialized JSON for all fields other than Sequence.
@@ -279,6 +280,7 @@ func NewWebSocketEvent(event WebsocketEventType, teamId, channelId, userId strin
 	}
 }
 
+// Copy creates a shallow copy of the WebSocketEvent preserving all fields
 func (ev *WebSocketEvent) Copy() *WebSocketEvent {
 	evCopy := &WebSocketEvent{
 		event:           ev.event,
@@ -286,10 +288,12 @@ func (ev *WebSocketEvent) Copy() *WebSocketEvent {
 		broadcast:       ev.broadcast,
 		sequence:        ev.sequence,
 		precomputedJSON: ev.precomputedJSON,
+		fromCluster:     ev.fromCluster, // Preserve cluster origin information
 	}
 	return evCopy
 }
 
+// DeepCopy creates a complete deep copy of the WebSocketEvent including all nested structures
 func (ev *WebSocketEvent) DeepCopy() *WebSocketEvent {
 	evCopy := &WebSocketEvent{
 		event:           ev.event,
@@ -297,6 +301,7 @@ func (ev *WebSocketEvent) DeepCopy() *WebSocketEvent {
 		broadcast:       ev.broadcast.copy(),
 		sequence:        ev.sequence,
 		precomputedJSON: ev.precomputedJSON.copy(),
+		fromCluster:     ev.fromCluster, // Preserve cluster origin information
 	}
 	return evCopy
 }
@@ -343,6 +348,20 @@ func (ev *WebSocketEvent) IsValid() bool {
 
 func (ev *WebSocketEvent) EventType() WebsocketEventType {
 	return ev.event
+}
+
+// IsFromCluster returns whether the WebSocketEvent originated from another cluster node.
+// This is important for preventing infinite event broadcasting loops between cluster nodes.
+func (ev *WebSocketEvent) IsFromCluster() bool {
+	return ev.fromCluster
+}
+
+// SetFromCluster marks a WebSocketEvent as originating from a cluster node.
+// Returns a copy of the event with the updated flag to maintain immutability.
+func (ev *WebSocketEvent) SetFromCluster(fromCluster bool) *WebSocketEvent {
+	evCopy := ev.Copy()
+	evCopy.fromCluster = fromCluster
+	return evCopy
 }
 
 func (ev *WebSocketEvent) ToJSON() ([]byte, error) {

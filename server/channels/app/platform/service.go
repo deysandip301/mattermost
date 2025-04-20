@@ -135,6 +135,7 @@ func New(sc ServiceConfig, options ...Option) (*PlatformService, error) {
 		},
 		licenseListeners:          map[string]func(*model.License, *model.License){},
 		additionalClusterHandlers: map[model.ClusterEvent]einterfaces.ClusterMessageHandler{},
+		forceEnableRedis:          true,
 	}
 
 	// Assume the first user account has not been created yet. A call to the DB will later check if this is really the case.
@@ -165,9 +166,10 @@ func New(sc ServiceConfig, options ...Option) (*PlatformService, error) {
 	// Step 1: Cache provider.
 	cacheConfig := ps.configStore.Get().CacheSettings
 	var err error
-	if *cacheConfig.CacheType == model.CacheTypeLRU {
-		ps.cacheProvider = cache.NewProvider()
-	} else if *cacheConfig.CacheType == model.CacheTypeRedis {
+	if ps.Config().ClusterSettings.Enable != nil && *ps.Config().ClusterSettings.Enable {
+		if *cacheConfig.CacheType != model.CacheTypeRedis {
+			return nil, errors.New("clustering requires Redis cache to be enabled")
+		}
 		ps.cacheProvider, err = cache.NewRedisProvider(
 			&cache.RedisOptions{
 				RedisAddr:        *cacheConfig.RedisAddress,
@@ -177,9 +179,28 @@ func New(sc ServiceConfig, options ...Option) (*PlatformService, error) {
 				DisableCache:     *cacheConfig.DisableClientCache,
 			},
 		)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("unable to create cache provider: %w", err)
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Redis provider: %w", err)
+		}
+	} else {
+		// Non-clustered mode cache initialization
+		if *cacheConfig.CacheType == model.CacheTypeLRU {
+			ps.cacheProvider = cache.NewProvider()
+		} else if *cacheConfig.CacheType == model.CacheTypeRedis {
+			ps.cacheProvider, err = cache.NewRedisProvider(
+				&cache.RedisOptions{
+					RedisAddr:        *cacheConfig.RedisAddress,
+					RedisPassword:    *cacheConfig.RedisPassword,
+					RedisDB:          *cacheConfig.RedisDB,
+					RedisCachePrefix: *cacheConfig.RedisCachePrefix,
+					DisableCache:     *cacheConfig.DisableClientCache,
+				},
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create Redis provider: %w", err)
+			}
+		}
 	}
 
 	// The value of res is used later, after the logger is initialized.
@@ -313,9 +334,11 @@ func New(sc ServiceConfig, options ...Option) (*PlatformService, error) {
 	// if the license didn't have clustering. But there's an intricate deadlock
 	// where license cannot be loaded before store, and store cannot be loaded before
 	// cache. So loading license before loading cache is an uphill battle.
-	if (license == nil || !*license.Features.Cluster) && *cacheConfig.CacheType == model.CacheTypeRedis && !ps.forceEnableRedis {
-		return nil, fmt.Errorf("Redis cannot be used in an instance without a license or a license without clustering")
-	}
+
+	// comment out this to bypass the license check
+	// if (license == nil || !*license.Features.Cluster) && *cacheConfig.CacheType == model.CacheTypeRedis && !ps.forceEnableRedis {
+	// 	return nil, fmt.Errorf("Redis cannot be used in an instance without a license or a license without clustering")
+	// }
 
 	// Step 9: Initialize filestore
 	if ps.filestore == nil {
@@ -461,8 +484,14 @@ func (ps *PlatformService) SetLogger(logger *mlog.Logger) {
 }
 
 func (ps *PlatformService) initEnterprise() {
-	if clusterInterface != nil && ps.clusterIFace == nil {
-		ps.clusterIFace = clusterInterface(ps)
+	if ps.clusterIFace == nil && ps.Config().ClusterSettings.Enable != nil && *ps.Config().ClusterSettings.Enable {
+		// Initialize Redis cluster without license check
+		if *ps.Config().CacheSettings.CacheType == model.CacheTypeRedis {
+			ps.clusterIFace = InitRedisCluster(ps)
+			if ps.clusterIFace != nil {
+				ps.logger.Info("Initialized Redis-based clustering")
+			}
+		}
 	}
 
 	if elasticsearchInterface != nil {
@@ -608,4 +637,25 @@ func (ps *PlatformService) DatabaseTypeAndSchemaVersion() (string, string, error
 	}
 
 	return model.SafeDereference(ps.Config().SqlSettings.DriverName), strconv.Itoa(schemaVersion), nil
+}
+
+// ConfigHash returns a hash representing the server configuration
+// Used by the redis cluster implementation
+func (ps *PlatformService) ConfigHash() string {
+	if hash := ps.clientConfigHash.Load(); hash != nil {
+		return hash.(string)
+	}
+	return ""
+}
+
+func (ps *PlatformService) Broadcast(eventType model.WebsocketEventType, data map[string]interface{}, broadcast *model.WebsocketBroadcast) {
+	event := model.NewWebSocketEvent(eventType, "", "", "", nil, "")
+	event.SetData(data)
+	if broadcast != nil {
+		event.SetBroadcast(broadcast)
+	}
+
+	for _, hub := range ps.hubs {
+		hub.Broadcast(event)
+	}
 }
