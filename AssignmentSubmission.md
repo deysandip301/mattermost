@@ -39,31 +39,188 @@ The solution revolves around a Redis-based cluster mechanism that provides:
 
 The enhanced architecture consists of:
 
-1. **Multiple Mattermost Application Servers**: Horizontally scalable application nodes
+1. **Multiple Mattermost Application Nodes**: Horizontally scalable application nodes behind a load balancer
 2. **Redis Cluster**: For inter-node communication, caching, and pub/sub messaging
 3. **Shared PostgreSQL Database**: For consistent data storage across nodes
-4. **Load Balancer**: For distributing client connections across application servers
 
 ```ascii
-                           ┌─────────────────┐
-                           │   Load Balancer │
-                           └────────┬────────┘
-                                    │
-                 ┌──────────────────┼──────────────────┐
-                 │                  │                  │
-        ┌────────▼─────────┐┌───────▼──────────┐┌──────▼───────────┐
-        │  Mattermost      ││  Mattermost      ││  Mattermost      │
-        │  Server Node 1   ││  Server Node 2   ││  Server Node 3   │
-        └────────┬─────────┘└───────┬──────────┘└──────┬───────────┘
-                 │                  │                  │
-                 └──────────────────┼──────────────────┘
-                                    │
-                        ┌───────────▼───────────┐
-                        │                       │
-                ┌───────▼────────┐      ┌───────▼──────────┐
-                │  Redis Cluster  │      │ PostgreSQL Database │
-                └────────────────┘      └────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                         │
+│                           Load Balancer                                 │
+│                                                                         │
+└───────────────────────────────┬───────────────────────────────┬─────────┘
+                                │                               │
+                                │                               │
+                                ▼                               ▼
+┌───────────────────────────────┴───────────────────────────────┴─────────┐
+│                                                                         │
+│            ┌─────────────────────┐             ┌─────────────────────┐ │
+│            │                     │             │                     │ │
+│            │  Mattermost Node 1  │             │  Mattermost Node 2  │ │
+│            │     (Port 8065)     │             │     (Port 8066)     │ │
+│            │                     │             │                     │ │
+│            └──────────┬──────────┘             └──────────┬──────────┘ │
+│                       │                                    │            │
+│                       │                                    │            │
+│                       └─────────────────┬─────────────────┘            │
+│                                         │                               │
+│                                         │                               │
+│                                         ▼                               │
+│            ┌────────────────────────────────────────────────────────────┐│
+│            │                                                            ││
+│            │                      Redis Server                          ││
+│            │                       (Port 6379)                          ││
+│            │                                                            ││
+│            └────────────────────────────────────────────────────────────┘│
+│                                                                         │
+└─────────────────────────────────────┬───────────────────────────────────┘
+                                      │
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                                                                 │   │
+│  │                    PostgreSQL Database                          │   │
+│  │                      (Port 5432)                                │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Development and Testing Setup
+
+For development and testing purposes, I implemented a two-node setup on a single machine using different ports. This approach allows developers to:
+
+1. Test the cluster functionality on a single development machine
+2. Verify real-time communication between nodes
+3. Simulate node failures and recovery
+
+## Development and Testing Environment
+
+### Multi-Node Cluster Setup for Development
+
+For development and testing purposes, I've implemented a simple yet effective approach to run a multi-node Mattermost cluster on a single machine. This setup allows for testing the horizontal scalability and high availability features without requiring multiple physical servers.
+
+#### Setup Components
+
+1. **Two Mattermost Nodes**: Independent server processes running on different ports (8065 and 8066)
+2. **Shared Redis Server**: For inter-node communication and synchronization
+3. **Shared PostgreSQL Database**: For consistent data storage across nodes
+
+#### Running the Cluster
+
+I've created simple scripts to facilitate running and managing the cluster:
+
+1. **Starting Node 1 (Default)**:
+   ```bash
+   # Node 1 uses default configuration
+   make run-server
+   ```
+
+2. **Starting Node 2**:
+   ```bash
+   # Run the second node on port 8066
+   ./server/run_node2.sh
+   ```
+
+3. **Checking Cluster Status**:
+   ```bash
+   # Verify both nodes are running properly
+   ./server/check-cluster.sh
+   ```
+
+#### Technical Details
+
+Each node is configured with environment variables to ensure proper separation:
+
+```bash
+# Node 2 Configuration
+export GO_BUILD_TAGS="mm_dev_cluster"  # Enable cluster-specific code
+export MM_FILESETTINGS_DIRECTORY="/tmp/mmdata2"  # Separate storage
+export MM_SERVICESETTINGS_LISTENADDRESS=":8066"  # Different port
+export MM_SQLSETTINGS_DATASOURCE="postgres://mmuser:mostest@localhost/mattermost_test?sslmode=disable"
+export MM_CACHESETTINGS_REDISADDRESS="localhost:6379"
+export MM_CLUSTERSETTINGS_ENABLE="true"
+```
+
+This approach provides several advantages:
+- Simple to set up and use
+- Uses Mattermost's built-in configuration system
+- Both nodes share the same database but maintain separate file storage
+- Real-time synchronization via Redis
+
+#### Testing the Cluster
+
+With both nodes running, you can verify proper cluster functionality by:
+
+1. Opening separate browser windows for each node:
+   - Node 1: http://localhost:8065
+   - Node 2: http://localhost:8066
+
+2. Logging in with the same user on both nodes
+
+3. Sending messages on one node and verifying they appear on the other
+
+4. Testing real-time features like presence updates and typing indicators across nodes
+
+This development setup demonstrates the same principles that would be used in a production deployment but in a controlled, single-machine environment that's ideal for development and testing.
+
+### Setup Scripts
+
+1. **setup-cluster.sh**: Prepares the environment for clustering by:
+   - Ensuring Redis is installed and running
+   - Configuring the main config file for Redis and clustering
+   - Creating a second config file for the second node with a different port
+
+2. **run-node1.sh**: Starts the first Mattermost node on port 8065 using the default make command:
+   ```bash
+   # Starting the first node
+   ./scripts/run-node1.sh
+   ```
+
+3. **run-node2.sh**: Starts the second Mattermost node on port 8066 with an alternate config:
+   ```bash
+   # Starting the second node
+   ./scripts/run-node2.sh
+   ```
+
+4. **test-cluster.sh**: Verifies the cluster is working correctly by:
+   - Checking if both nodes are responding
+   - Verifying Redis connectivity
+   - Retrieving and comparing cluster information from both nodes
+
+### Running the Cluster Locally
+
+To run a two-node Mattermost cluster on your development machine:
+
+1. Set up the environment:
+   ```bash
+   ./scripts/setup-cluster.sh
+   ```
+
+2. Open two terminal windows and start each node:
+   ```bash
+   # Terminal 1
+   ./scripts/run-node1.sh
+
+   # Terminal 2
+   ./scripts/run-node2.sh
+   ```
+
+3. Access the nodes in your browser:
+   - Node 1: http://localhost:8065
+   - Node 2: http://localhost:8066
+
+4. Test cluster functionality:
+   ```bash
+   ./scripts/test-cluster.sh
+   ```
+
+This setup allows developers to:
+1. Test cluster communication on a single machine
+2. Develop and debug cluster features without requiring multiple servers
+3. Simulate node failures by stopping one of the node processes
 
 ### Key Components
 
